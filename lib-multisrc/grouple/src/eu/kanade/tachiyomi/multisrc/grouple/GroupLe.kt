@@ -1,12 +1,12 @@
 package eu.kanade.tachiyomi.multisrc.grouple
 
-import android.app.Application
 import android.content.SharedPreferences
 import android.widget.Toast
 import eu.kanade.tachiyomi.network.GET
 import eu.kanade.tachiyomi.network.asObservableSuccess
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.source.ConfigurableSource
+import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
@@ -14,6 +14,7 @@ import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.ParsedHttpSource
 import eu.kanade.tachiyomi.util.asJsoup
+import keiyoushi.utils.getPreferencesLazy
 import okhttp3.Headers
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
@@ -22,8 +23,6 @@ import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import rx.Observable
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 import java.io.IOException
 import java.text.DecimalFormat
 import java.text.ParseException
@@ -37,9 +36,7 @@ abstract class GroupLe(
     final override val lang: String,
 ) : ConfigurableSource, ParsedHttpSource() {
 
-    private val preferences: SharedPreferences by lazy {
-        Injekt.get<Application>().getSharedPreferences("source_$id", 0x0000)
-    }
+    private val preferences: SharedPreferences by getPreferencesLazy()
 
     override val supportsLatest = true
 
@@ -77,10 +74,10 @@ abstract class GroupLe(
     override fun latestUpdatesSelector() = popularMangaSelector()
 
     override fun popularMangaRequest(page: Int): Request =
-        GET("$baseUrl/list?sortType=rate&offset=${70 * (page - 1)}", headers)
+        GET("$baseUrl/list?sortType=rate&offset=${50 * (page - 1)}", headers)
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$baseUrl/list?sortType=updated&offset=${70 * (page - 1)}", headers)
+        GET("$baseUrl/list?sortType=updated&offset=${50 * (page - 1)}", headers)
 
     override fun popularMangaFromElement(element: Element): SManga {
         val manga = SManga.create()
@@ -107,14 +104,72 @@ abstract class GroupLe(
     override fun searchMangaNextPageSelector() = popularMangaNextPageSelector()
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
-        val url =
-            "$baseUrl/search/advancedResults?offset=${50 * (page - 1)}".toHttpUrl()
-                .newBuilder()
+        val url = "$baseUrl/search/advancedResults?offset=${50 * (page - 1)}"
+            .toHttpUrl()
+            .newBuilder()
+
         if (query.isNotEmpty()) {
             url.addQueryParameter("q", query)
         }
+
+        (if (filters.isEmpty()) getFilterList() else filters).forEach { filter ->
+            when (filter) {
+                is GenreList -> filter.state.forEach { genre ->
+                    if (genre.state != Filter.TriState.STATE_IGNORE) {
+                        url.addQueryParameter(genre.id, arrayOf("=", "=in", "=ex")[genre.state])
+                    }
+                }
+
+                is CategoryList -> filter.state.forEach { category ->
+                    if (category.state != Filter.TriState.STATE_IGNORE) {
+                        url.addQueryParameter(category.id, arrayOf("=", "=in", "=ex")[category.state])
+                    }
+                }
+
+                is AgeList -> filter.state.forEach { age ->
+                    if (age.state != Filter.TriState.STATE_IGNORE) {
+                        url.addQueryParameter(age.id, arrayOf("=", "=in", "=ex")[age.state])
+                    }
+                }
+
+                is MoreList -> filter.state.forEach { more ->
+                    if (more.state != Filter.TriState.STATE_IGNORE) {
+                        url.addQueryParameter(more.id, arrayOf("=", "=in", "=ex")[more.state])
+                    }
+                }
+
+                is AdditionalFilterList -> filter.state.forEach { fils ->
+                    if (fils.state != Filter.TriState.STATE_IGNORE) {
+                        url.addQueryParameter(fils.id, arrayOf("=", "=in", "=ex")[fils.state])
+                    }
+                }
+
+                is OrderBy -> {
+                    url.addQueryParameter(
+                        "sortType",
+                        arrayOf("RATING", "POPULARITY", "YEAR", "NAME", "DATE_CREATE", "DATE_UPDATE", "USER_RATING")[filter.state],
+                    )
+                }
+
+                else -> {}
+            }
+        }
+
         return GET(url.toString().replace("=%3D", "="), headers)
     }
+
+    protected class OrderBy : Filter.Select<String>(
+        "Сортировка",
+        arrayOf("По популярности", "Популярно сейчас", "По году", "По алфавиту", "Новинки", "По дате обновления", "По рейтингу"),
+    )
+
+    protected class Genre(name: String, val id: String) : Filter.TriState(name)
+
+    protected class GenreList(genres: List<Genre>) : Filter.Group<Genre>("Жанры", genres)
+    protected class CategoryList(categories: List<Genre>) : Filter.Group<Genre>("Категории", categories)
+    protected class AgeList(ages: List<Genre>) : Filter.Group<Genre>("Возрастная рекомендация", ages)
+    protected class MoreList(moren: List<Genre>) : Filter.Group<Genre>("Прочее", moren)
+    protected class AdditionalFilterList(fils: List<Genre>) : Filter.Group<Genre>("Фильтры", fils)
 
     override fun mangaDetailsParse(document: Document): SManga {
         val infoElement = document.select(".expandable").first()!!
@@ -129,7 +184,7 @@ abstract class GroupLe(
             infoElement.select(".info-icon").attr("data-content").substringBeforeLast("/5</b><br/>")
                 .substringAfterLast(": <b>").replace(",", ".").toFloat() * 2
         val ratingVotes =
-            infoElement.select(".col-sm-7 .user-rating meta[itemprop=\"ratingCount\"]")
+            infoElement.select(".col-sm-6 .user-rating meta[itemprop=\"ratingCount\"]")
                 .attr("content")
         val ratingStar = when {
             ratingValue > 9.5 -> "★★★★★"
@@ -209,14 +264,16 @@ abstract class GroupLe(
     }
 
     protected open fun getChapterSearchParams(document: Document): String {
-        return "?mtr=true"
+        val scriptContent = document.selectFirst("script:containsData(user_hash)")?.data()
+        val userHash = scriptContent?.let { USER_HASH_REGEX.find(it)?.groupValues?.get(1) }
+        return userHash?.let { "?d=$it&mtr=true" } ?: "?mtr=true"
     }
 
     private fun chapterListParse(response: Response, manga: SManga): List<SChapter> {
         val document = response.asJsoup()
 
         if (document.select(".user-avatar").isEmpty() &&
-            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") }
+            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") || contains("RuMix") }
         ) {
             throw Exception("Для просмотра контента необходима авторизация через WebView\uD83C\uDF0E")
         }
@@ -309,7 +366,7 @@ abstract class GroupLe(
         val html = document.html()
 
         if (document.select(".user-avatar").isEmpty() &&
-            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") }
+            document.title().run { contains("AllHentai") || contains("MintManga") || contains("МинтМанга") || contains("RuMix") }
 
         ) {
             throw Exception("Для просмотра контента необходима авторизация через WebView\uD83C\uDF0E")
@@ -322,6 +379,9 @@ abstract class GroupLe(
                 throw Exception("Не удалось загрузить главу. Url: ${response.request.url}")
             }
             else -> {
+                if (document.selectFirst("div.alert") != null || document.selectFirst("form.purchase-form") != null) {
+                    throw Exception("Эта глава платная. Используйте сайт, чтобы купить и прочитать ее.")
+                }
                 throw Exception("Дизайн сайта обновлен, для дальнейшей работы необходимо обновление дополнения")
             }
         }
@@ -436,5 +496,6 @@ abstract class GroupLe(
         private const val UAGENT_TITLE = "User-Agent(для некоторых стран)"
         private const val UAGENT_DEFAULT = "arora"
         const val PREFIX_SLUG_SEARCH = "slug:"
+        private val USER_HASH_REGEX = "user_hash.+'(.+)'".toRegex()
     }
 }

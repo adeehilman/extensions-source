@@ -2,7 +2,7 @@ plugins {
     id("lib-multisrc")
 }
 
-baseVersionCode = 39
+baseVersionCode = 42
 
 dependencies {
     api(project(":lib:cryptoaes"))

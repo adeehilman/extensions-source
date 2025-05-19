@@ -5,9 +5,8 @@ import eu.kanade.tachiyomi.multisrc.iken.Iken
 class HiveScans : Iken(
     "Hive Scans",
     "en",
-    "https://hivetoon.com",
+    "https://hivecomic.com",
 ) {
-
     override val versionId = 2
 
     override val client = super.client.newBuilder()

@@ -39,7 +39,7 @@ class HoneyManga : HttpSource() {
         .add("Origin", baseUrl)
         .add("Referer", baseUrl)
 
-    override val client = network.client.newBuilder()
+    override val client = network.cloudflareClient.newBuilder()
         .rateLimitHost(API_URL.toHttpUrl(), 10)
         .build()
 
@@ -106,7 +106,7 @@ class HoneyManga : HttpSource() {
 
     override fun chapterListParse(response: Response): List<SChapter> {
         val result = response.asClass<HoneyMangaChapterResponseDto>()
-        return result.data.map {
+        return result.data.filter { !it.isMonetized }.map {
             val suffix = if (it.subChapterNum == 0) "" else ".${it.subChapterNum}"
             SChapter.create().apply {
                 url = "$baseUrl/read/${it.id}/${it.mangaId}"
