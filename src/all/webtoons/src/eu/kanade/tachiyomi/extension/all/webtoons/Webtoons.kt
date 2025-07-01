@@ -18,22 +18,20 @@ import eu.kanade.tachiyomi.util.asJsoup
 import keiyoushi.utils.firstInstanceOrNull
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
-import keiyoushi.utils.tryParse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import org.jsoup.parser.Parser
 import rx.Observable
 import java.net.SocketException
-import java.text.SimpleDateFormat
 import java.util.Calendar
 
 open class Webtoons(
     override val lang: String,
     private val langCode: String = lang,
     localeForCookie: String = lang,
-    private val dateFormat: SimpleDateFormat,
 ) : HttpSource(), ConfigurableSource {
     override val name = "Webtoons.com"
     override val baseUrl = "https://www.webtoons.com"
@@ -125,18 +123,23 @@ open class Webtoons(
 
     override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         if (query.startsWith(ID_SEARCH_PREFIX)) {
-            val (_, titleLang, titleNo) = query.split(":", limit = 3)
+            val (_, type, lang, titleNo) = query.split(":", limit = 4)
             val tmpManga = SManga.create().apply {
-                url = "/episodeList?titleNo=$titleNo"
+                url = buildString {
+                    if (type == "canvas") {
+                        append("/challenge")
+                    }
+                    append("/episodeList?titleNo=")
+                    append(titleNo)
+                }
             }
-            return if (titleLang == langCode) {
+
+            return if (lang == langCode) {
                 fetchMangaDetails(tmpManga).map {
                     MangasPage(listOf(it), false)
                 }
             } else {
-                Observable.just(
-                    MangasPage(emptyList(), false),
-                )
+                Observable.just(MangasPage(emptyList(), false))
             }
         }
 
@@ -199,11 +202,11 @@ open class Webtoons(
             status = with(infoElement?.selectFirst("p.day_info")?.text().orEmpty()) {
                 when {
                     contains("UP") || contains("EVERY") || contains("NOUVEAU") -> SManga.ONGOING
-                    contains("END") || contains("TERMINÉ") -> SManga.COMPLETED
+                    contains("END") || contains("COMPLETED") || contains("TERMINÉ") -> SManga.COMPLETED
                     else -> SManga.UNKNOWN
                 }
             }
-
+            initialized = true
             thumbnail_url = run {
                 val bannerFile = document.selectFirst(".detail_header .thmb img")
                     ?.absUrl("src")
@@ -231,25 +234,96 @@ open class Webtoons(
         throw UnsupportedOperationException()
     }
 
-    override fun chapterListRequest(manga: SManga) = GET(mobileUrl + manga.url, mobileHeaders)
+    override fun chapterListRequest(manga: SManga): Request {
+        val webtoonUrl = getMangaUrl(manga).toHttpUrl()
+        val titleId = webtoonUrl.queryParameter("title_no")
+            ?: webtoonUrl.queryParameter("titleNo")
+            ?: throw Exception("Migrate from $name to $name")
 
-    override fun chapterListParse(response: Response): List<SChapter> {
-        val document = response.asJsoup()
+        val type = run {
+            val path = webtoonUrl.pathSegments.filter(String::isNotEmpty)
 
-        return document.select("ul#_episodeList li[id*=episode] a").map { element ->
-            SChapter.create().apply {
-                setUrlWithoutDomain(element.absUrl("href"))
-                name = element.selectFirst(".sub_title > span.ellipsis")!!.text()
-                element.selectFirst("a > div.row > div.num")?.let {
-                    name += " Ch. " + it.text().substringAfter("#")
+            // older url pattern, people have in their library
+            if (webtoonUrl.encodedPath.contains("episodeList")) {
+                when (path[0]) {
+                    // "/episodeList?titleNo=1049"
+                    "episodeList" -> "webtoon"
+                    // "/challenge/episodeList?titleNo=304446"
+                    "challenge" -> "canvas"
+                    else -> throw Exception("Migrate from $name to $name")
                 }
-                element.selectFirst(".ico_bgm")?.also {
-                    name += " ♫"
+            } else {
+                // "/en/canvas/meme-girls/list?title_no=304446"
+                if (path[1] == "canvas") {
+                    "canvas"
+                } else {
+                    "webtoon"
                 }
-                date_upload = dateFormat.tryParse(element.selectFirst(".sub_info .date")?.text())
             }
         }
+
+        val url = mobileUrl.toHttpUrl().newBuilder().apply {
+            addPathSegments("api/v1")
+            addPathSegment(type)
+            addPathSegment(titleId)
+            addPathSegment("episodes")
+            addQueryParameter("pageSize", "99999")
+        }.build()
+
+        return GET(url, mobileHeaders)
     }
+
+    override fun chapterListParse(response: Response): List<SChapter> {
+        val result = response.parseAs<EpisodeListResponse>()
+
+        val recognized: MutableList<Int> = mutableListOf()
+        val unrecognized: MutableList<Int> = mutableListOf()
+
+        val chapters = result.result.episodeList.mapIndexed { index, episode ->
+            SChapter.create().apply {
+                url = episode.viewerLink
+                name = Parser.unescapeEntities(episode.episodeTitle, false)
+                if (episode.hasBgm) {
+                    name += " ♫"
+                }
+                date_upload = episode.exposureDateMillis
+                chapter_number = episodeNoRegex
+                    .find(episode.episodeTitle)
+                    ?.groupValues
+                    ?.get(4)
+                    ?.toFloat()
+                    ?: -1f
+                if (chapter_number == -1f) {
+                    unrecognized += index
+                } else {
+                    recognized += index
+                }
+            }
+        }
+
+        if (unrecognized.size > recognized.size) {
+            chapters.onEachIndexed { index, chapter ->
+                chapter.chapter_number = (index + 1).toFloat()
+            }
+        } else {
+            unrecognized.forEach { uIdx ->
+                val chapter = chapters[uIdx]
+                val previous = chapters.getOrNull(uIdx - 1)
+                if (previous == null) {
+                    chapter.chapter_number = 0f
+                } else {
+                    chapter.chapter_number = previous.chapter_number + 0.01f
+                }
+            }
+        }
+
+        return chapters.asReversed()
+    }
+
+    private val episodeNoRegex = Regex(
+        """(ep(isode)?|ch(apter)?)\s*\.?\s*(\d+(\.\d+)?)""",
+        RegexOption.IGNORE_CASE,
+    )
 
     override fun pageListParse(response: Response): List<Page> {
         val document = response.asJsoup()
